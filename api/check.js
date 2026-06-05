@@ -74,60 +74,60 @@ export default async function handler(req, res) {
     const cutoff = Date.now() - ALERT_HOURS * 3600 * 1000;
     const now = new Date();
 
-    const users = await asanaGet(`/workspaces/${WORKSPACE_GID}/users?opt_fields=gid,email,name`);
-    const teamMembers = users.filter(u => TEAM.map(t => t.email).includes(u.email));
+    // Buscar usuarios del equipo
+    const users = await asanaGet(`/workspaces/${WORKSPACE_GID}/users?opt_fields=gid,email,name&limit=100`);
+    const teamEmails = TEAM.map(t => t.email);
+    const teamMembers = users.filter(u => teamEmails.includes(u.email));
     console.log('[Taskpatrol] Team:', teamMembers.map(m => m.email).join(', '));
 
-    const projects = await asanaGet(`/projects?workspace=${WORKSPACE_GID}&archived=false&opt_fields=gid,name&limit=20`);
-    console.log('[Taskpatrol] Proyectos:', projects.length);
-
+    // Buscar tareas directamente por usuario en vez de por proyecto
     let totalEmails = 0;
-
     for (const member of teamMembers) {
       const teamInfo = TEAM.find(t => t.email === member.email);
       const mentions = [];
       const overdue = [];
 
-      for (const project of projects) {
-        const tasks = await asanaGet(
-          `/projects/${project.gid}/tasks?opt_fields=gid,name,assignee.gid,due_on,modified_at,completed&limit=50`
+      // Traer tareas asignadas al usuario directamente
+      const tasks = await asanaGet(
+        `/tasks?assignee=${member.gid}&workspace=${WORKSPACE_GID}&completed_since=now&opt_fields=gid,name,due_on,modified_at,memberships.project.gid,memberships.project.name&limit=50`
+      );
+      console.log(`[Taskpatrol] ${member.email}: ${tasks.length} tareas`);
+
+      for (const task of tasks) {
+        const projectGid = task.memberships?.[0]?.project?.gid || WORKSPACE_GID;
+        const projectName = task.memberships?.[0]?.project?.name || 'Sin proyecto';
+
+        // Menciones sin respuesta
+        const stories = await asanaGet(
+          `/tasks/${task.gid}/stories?opt_fields=type,text,created_at,created_by.gid&limit=50`
         );
-
-        for (const task of tasks) {
-          if (task.completed || !task.assignee) continue;
-          if (task.assignee.gid !== member.gid) continue;
-
-          const stories = await asanaGet(
-            `/tasks/${task.gid}/stories?opt_fields=type,text,created_at,created_by.gid&limit=50`
+        const oldMentions = stories.filter(
+          s => s.type === 'comment' && s.text?.includes('@') &&
+               new Date(s.created_at).getTime() < cutoff
+        );
+        for (const mention of oldMentions) {
+          const replied = stories.some(
+            s => s.type === 'comment' &&
+                 s.created_by?.gid === member.gid &&
+                 new Date(s.created_at) > new Date(mention.created_at)
           );
-          const oldMentions = stories.filter(
-            s => s.type === 'comment' && s.text?.includes('@') &&
-                 new Date(s.created_at).getTime() < cutoff
-          );
-          for (const mention of oldMentions) {
-            const replied = stories.some(
-              s => s.type === 'comment' &&
-                   s.created_by?.gid === member.gid &&
-                   new Date(s.created_at) > new Date(mention.created_at)
-            );
-            if (!replied) {
-              const hoursAgo = Math.round((Date.now() - new Date(mention.created_at).getTime()) / 3600000);
-              mentions.push({ taskName: task.name, taskGid: task.gid, projectName: project.name, projectGid: project.gid, hoursAgo });
-            }
+          if (!replied) {
+            const hoursAgo = Math.round((Date.now() - new Date(mention.created_at).getTime()) / 3600000);
+            mentions.push({ taskName: task.name, taskGid: task.gid, projectName, projectGid, hoursAgo });
           }
+        }
 
-          if (task.due_on) {
-            const dueDate = new Date(task.due_on);
-            if (dueDate < now && new Date(task.modified_at).getTime() < cutoff) {
-              const daysOverdue = Math.round((now - dueDate) / 86400000);
-              overdue.push({ taskName: task.name, taskGid: task.gid, projectName: project.name, projectGid: project.gid, dueOn: task.due_on, daysOverdue });
-            }
+        // Tareas vencidas
+        if (task.due_on) {
+          const dueDate = new Date(task.due_on);
+          if (dueDate < now && new Date(task.modified_at).getTime() < cutoff) {
+            const daysOverdue = Math.round((now - dueDate) / 86400000);
+            overdue.push({ taskName: task.name, taskGid: task.gid, projectName, projectGid, dueOn: task.due_on, daysOverdue });
           }
         }
       }
 
       console.log(`[Taskpatrol] ${member.email}: ${mentions.length} menciones, ${overdue.length} vencidas`);
-
       if (mentions.length > 0 || overdue.length > 0) {
         await sendEmail(member.email, teamInfo?.name || member.name, mentions, overdue);
         totalEmails++;
