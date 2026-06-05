@@ -74,14 +74,12 @@ export default async function handler(req, res) {
     const cutoff = Date.now() - ALERT_HOURS * 3600 * 1000;
     const now = new Date();
 
-    // Traer usuarios del workspace y matchear con el equipo
     const users = await asanaGet(`/workspaces/${WORKSPACE_GID}/users?opt_fields=gid,email,name`);
     const teamMembers = users.filter(u => TEAM.map(t => t.email).includes(u.email));
-    console.log('[Taskpatrol] Team encontrado:', teamMembers.map(m => m.email).join(', '));
+    console.log('[Taskpatrol] Team:', teamMembers.map(m => m.email).join(', '));
 
-    // Traer todos los proyectos
-    const projects = await asanaGet(`/projects?workspace=${WORKSPACE_GID}&archived=false&opt_fields=gid,name`);
-    console.log('[Taskpatrol] Proyectos:', projects.length, projects.map(p => p.name).join(', '));
+    const projects = await asanaGet(`/projects?workspace=${WORKSPACE_GID}&archived=false&opt_fields=gid,name&limit=20`);
+    console.log('[Taskpatrol] Proyectos:', projects.length);
 
     let totalEmails = 0;
 
@@ -92,16 +90,15 @@ export default async function handler(req, res) {
 
       for (const project of projects) {
         const tasks = await asanaGet(
-          `/projects/${project.gid}/tasks?opt_fields=gid,name,assignee.gid,due_on,modified_at,completed`
+          `/projects/${project.gid}/tasks?opt_fields=gid,name,assignee.gid,due_on,modified_at,completed&limit=50`
         );
 
         for (const task of tasks) {
           if (task.completed || !task.assignee) continue;
           if (task.assignee.gid !== member.gid) continue;
 
-          // Menciones sin respuesta
           const stories = await asanaGet(
-            `/tasks/${task.gid}/stories?opt_fields=type,text,created_at,created_by.gid`
+            `/tasks/${task.gid}/stories?opt_fields=type,text,created_at,created_by.gid&limit=50`
           );
           const oldMentions = stories.filter(
             s => s.type === 'comment' && s.text?.includes('@') &&
@@ -119,7 +116,6 @@ export default async function handler(req, res) {
             }
           }
 
-          // Tareas vencidas
           if (task.due_on) {
             const dueDate = new Date(task.due_on);
             if (dueDate < now && new Date(task.modified_at).getTime() < cutoff) {
